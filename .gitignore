@@ -1,5 +1,18 @@
-venv/
-.env
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Local config
+.env
+*.db
+
+# System
 .DS_Store
-_reports/
+Thumbs.db
+
+# Streamlit cache
+.streamlit/

@@ -79,3 +79,12 @@ requests-toolbelt==1.0.0
 
 # --- Optional, useful in your repo (safe to keep) ---
 GitPython==3.1.45
+
+streamlit>=1.49.1
+openai>=2.0.0
+pandas>=2.3.2
+numpy>=2.0.2
+faker>=28.0.0
+ollama>=0.1.0
+requests>=2.32.0
+feedparser>=6.0.11
