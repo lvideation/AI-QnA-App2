@@ -11,7 +11,7 @@ from app.sessions.store import (
     ensure_tables, get_or_create_session, list_sessions, rename_session,
     delete_session, save_turn, list_turns, save_feedback_for_turn
 )
-from app.external.company import fetch_sec_10k_items, fetch_news_snippets
+from app.external.company import fetch_sec_10k_items, fetch_news_snippets, summarize_10k_business_priorities
 
 # ---------------- Page & global styles ----------------
 st.set_page_config(page_title="AI-QnA — Unified Query", layout="wide")
@@ -21,7 +21,7 @@ st.markdown("""
   .block-container { padding: 0.9rem 1.1rem; }
   header[data-testid="stHeader"] { height: 0; }
   #MainMenu, footer { visibility: hidden; }
-  div.stButton>button { font-size:12px !important; padding:0.25rem 0.6rem; }
+  div.stButton>button { font-size:11px !important; padding:0.22rem 0.55rem; white-space: nowrap; }
   .pill { display:inline-block; padding:.2rem .5rem; border-radius:999px; font-size:12px; margin-left:.5rem; }
   .pill-db { background:#e6f2ff; color:#024; }
   .pill-10k { background:#eef7e9; color:#062; }
@@ -31,7 +31,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- Ensure app tables ----------------
+# ---------------- Ensure app tables & migrations ----------------
 ensure_tables()
 
 # ---------------- Helpers ----------------
@@ -51,7 +51,6 @@ def run_readonly_sql(conn, sql, limit=1000):
     if not low.startswith("select") or any(tok in low for tok in forbidden):
         raise ValueError("Only read-only SELECT queries are allowed.")
     import re as _re
-    # add LIMIT only if none present anywhere
     if not _re.search(r"\blimit\s+\d+\b", s0, flags=_re.IGNORECASE):
         s0 = f"{s0} LIMIT {int(limit)}"
     return pd.read_sql_query(s0, conn)
@@ -62,7 +61,6 @@ def suggest_visual(df: pd.DataFrame):
     num = df.select_dtypes(include="number").columns.tolist()
     dt  = df.select_dtypes(include=["datetime64[ns]", "datetimetz"]).columns.tolist()
     cat = [c for c in df.columns if c not in num + dt]
-    # try parsing object→datetime for obvious date-like columns
     for c in df.columns:
         if df[c].dtype == "object":
             try:
@@ -72,63 +70,56 @@ def suggest_visual(df: pd.DataFrame):
                     if c not in dt: dt.append(c)
             except Exception:
                 pass
-    if dt and num:
-        return "line", (dt[0], num[0]), df
-    if cat and num:
-        return "bar", (cat[0], num[0]), df.groupby(cat[0], dropna=False, as_index=False)[num[0]].sum()
-    if len(num) >= 2:
-        return "scatter", (num[0], num[1]), df
-    if len(num) == 1:
-        return "hist", (None, num[0]), df
+    if dt and num:         return "line",    (dt[0], num[0]), df
+    if cat and num:        return "bar",     (cat[0], num[0]), df.groupby(cat[0], dropna=False, as_index=False)[num[0]].sum()
+    if len(num) >= 2:      return "scatter", (num[0], num[1]), df
+    if len(num) == 1:      return "hist",    (None,    num[0]), df
     return None, (None, None), df
 
-# ---------------- Sidebar: DB badge + session manager ----------------
+# ---------------- Sidebar: DB badge + simpler session save ----------------
 with get_conn() as _c:
     _tables = list_tables(_c)
 
 st.sidebar.caption(f"DB: {Path(str(DB_PATH)).name if DB_PATH else 'not set'}")
 
-if "session_name" not in st.session_state:
-    st.session_state.session_name = ""
-
+# Session controls: Name + Save/Load + Delete (simpler than old rename flow)
 st.sidebar.markdown("**Session**")
 sess_rows = list_sessions()
 sess_names = [name for (_id, name) in sess_rows]
-current = st.sidebar.selectbox("Choose", options=["(none)"] + sess_names, index=0)
-if current != "(none)":
-    st.session_state.session_name = current
+current = st.sidebar.selectbox("Load", options=["(none)"] + sess_names, index=0)
 
-new_name = st.sidebar.text_input("New / rename to", value="")
-c1, c2, c3 = st.sidebar.columns(3)
-if c1.button("New"):
-    if new_name.strip():
-        st.session_state.session_name = new_name.strip()
-        get_or_create_session(st.session_state.session_name)
-        st.success(f"Session created: {st.session_state.session_name}")
+if "session_name" not in st.session_state:
+    st.session_state.session_name = "" if current == "(none)" else current
+
+sess_name_input = st.sidebar.text_input("Session name", value=st.session_state.session_name or "")
+sc1, sc2, sc3 = st.sidebar.columns(3)
+if sc1.button("Save"):
+    name = (sess_name_input or "").strip()
+    if not name:
+        st.warning("Enter a session name before saving.")
     else:
-        st.warning("Type a name first.")
-if c2.button("Rename"):
-    if current != "(none)" and new_name.strip():
-        sid = get_or_create_session(current)
-        rename_session(sid, new_name.strip())
-        st.session_state.session_name = new_name.strip()
-        st.success(f"Renamed to: {st.session_state.session_name}")
+        st.session_state.session_name = name
+        get_or_create_session(name)
+        st.success(f"Saved session: {name}")
+if sc2.button("Load"):
+    if current != "(none)":
+        st.session_state.session_name = current
+        st.success(f"Loaded session: {current}")
     else:
-        st.warning("Pick an existing session and a new name.")
-if c3.button("Delete"):
+        st.info("Pick a session from the dropdown to load.")
+if sc3.button("Delete"):
     if current != "(none)":
         sid = get_or_create_session(current)
         delete_session(sid)
         st.session_state.session_name = ""
         st.success("Session deleted.")
     else:
-        st.warning("Pick a session to delete.")
+        st.info("Pick a session to delete.")
 
 # ---------------- Center: single input + Clarify (no SQL shown) ----------------
 st.title("Ask anything")
 st.caption("I’ll decide: CRM DB, 10-K, or News. (Clarify proposes a rewrite; no SQL is shown.)")
 
-# State init
 if "user_q" not in st.session_state:
     st.session_state.user_q = "Show top open opportunities by value with account and AE"
 if "suggested_q" not in st.session_state:
@@ -152,7 +143,7 @@ with row1[2]:
 with row1[3]:
     route_override = st.selectbox("Route (auto or force)", ["Auto", "CRM DB", "10-K", "News"], index=0)
 
-# --- Handle Clarify FIRST (so proposed text shows on first click) ---
+# Clarify first
 if clar:
     try:
         schema_hint = ", ".join(_tables[:10]) if _tables else ""
@@ -162,13 +153,13 @@ if clar:
     except Exception as e:
         st.error(str(e))
 
-# --- Then render the proposed rewrite with Use/Keep options ---
+# Show the proposed rewrite with Use/Keep
 if st.session_state.suggested_q:
     st.markdown("**Proposed rewrite:**")
     st.markdown(f"<div class='suggestbox'>{st.session_state.suggested_q}</div>", unsafe_allow_html=True)
-    ac1, ac2 = st.columns([1,1])
+    ac1, ac2 = st.columns(2)
     if ac1.button("Use suggestion"):
-        st.session_state["pending_user_q"] = st.session_state.suggested_q  # set for next run
+        st.session_state["pending_user_q"] = st.session_state.suggested_q
         st.session_state.suggested_q = None
         st.rerun()
     if ac2.button("Keep original"):
@@ -177,8 +168,11 @@ if st.session_state.suggested_q:
 
 # ---------------- Go: classify (or override) and fulfill ----------------
 if go:
-    q = st.session_state.user_q.strip()
-    if not q:
+    original_q = st.session_state.user_q.strip()
+    # Auto-use Clarify for this run (even if user didn't click "Use suggestion")
+    effective_q = (st.session_state.suggested_q or original_q).strip()
+
+    if not effective_q:
         st.warning("Please type a question.")
     else:
         # Route override (if user forces it)
@@ -189,31 +183,28 @@ if go:
         elif route_override == "News":
             route = "external_news"
         else:
-            route = classify_intent(q)
+            route = classify_intent(effective_q)
 
         pill = {"crm_db":"pill-db","external_10k":"pill-10k","external_news":"pill-news","offtopic":"pill-off"}[route]
         st.markdown(f"**Route:** <span class='pill {pill}'>{route}</span>", unsafe_allow_html=True)
         st.session_state.last_turn_id = None
 
-        # ---- CRM DB path: NL -> SQL (hidden) -> run (with auto-repair once) ----
         if route == "crm_db":
             try:
                 schema_text = get_schema_snapshot()
-                sql = generate_sql_from_nl(q, schema_text)
+                sql = generate_sql_from_nl(effective_q, schema_text)
                 with get_conn() as conn:
                     try:
                         df = run_readonly_sql(conn, sql, limit=limit)
                     except Exception as e1:
-                        fixed = repair_sql_with_error(q, schema_text, sql, str(e1))
+                        fixed = repair_sql_with_error(effective_q, schema_text, sql, str(e1))
                         if not fixed:
                             raise
                         df = run_readonly_sql(conn, fixed, limit=limit)
-                        sql = fixed  # use repaired SQL for logging
-
+                        sql = fixed
                 st.success(f"Returned {len(df)} rows")
                 st.dataframe(df, use_container_width=True)
 
-                # Suggested visual
                 try:
                     chart, (x, y), df2 = suggest_visual(df.copy())
                 except Exception:
@@ -230,14 +221,13 @@ if go:
                 else:
                     st.info("No obvious chart for these results.")
 
-                # Persist turn (we do not display SQL as per your UX; storing is optional. Here: not storing.)
                 if st.session_state.get("session_name"):
                     sid = get_or_create_session(st.session_state["session_name"])
                     st.session_state.last_turn_id = save_turn(
                         session_id=sid,
                         mode="NL-DB",
-                        question=q,
-                        clarified_question=st.session_state.suggested_q,
+                        question=original_q,
+                        clarified_question=(st.session_state.suggested_q or None),
                         sql=None,
                         row_count=int(len(df)),
                         chart_type=chart
@@ -245,57 +235,63 @@ if go:
             except Exception as e:
                 st.error(f"Couldn’t complete the DB query. Try rephrasing or hit Clarify. Details: {e}")
 
-        # ---- 10-K path ----
         elif route == "external_10k":
-            items = fetch_sec_10k_items(q)
+            items = fetch_sec_10k_items(effective_q, max_items=5)
             st.subheader("10-K filings")
             if items:
                 st.dataframe(pd.DataFrame(items), use_container_width=True)
+                # Summarize business priorities from the most recent filing
+                summary = summarize_10k_business_priorities(items[0]["url"])
+                if summary:
+                    st.markdown("#### Business Priorities (10-K)")
+                    st.markdown(summary)
+                else:
+                    st.info("Couldn’t summarize priorities (network/parse limits). You can open the filing link above.")
             else:
                 tips = []
                 if not os.getenv("SEC_EMAIL"):
                     tips.append("Set SEC_EMAIL in your .env (used in SEC User-Agent).")
                 tips.append("Try a precise company or ticker (e.g., AAPL, MSFT).")
-                tips.append("Include '10-K' or 'annual report' in your question, or force route via the selector.")
+                tips.append("Include '10-K' or 'annual report' in your question, or force the route in the dropdown.")
                 st.info("No 10-K results.\n\n- " + "\n- ".join(tips))
             if st.session_state.get("session_name"):
                 sid = get_or_create_session(st.session_state["session_name"])
                 st.session_state.last_turn_id = save_turn(
-                    session_id=sid, mode="EXT-10K", question=q, clarified_question=st.session_state.suggested_q,
+                    session_id=sid, mode="EXT-10K", question=original_q,
+                    clarified_question=(st.session_state.suggested_q or None),
                     sql=None, row_count=None, chart_type=None
                 )
 
-        # ---- News path ----
         elif route == "external_news":
-            news = fetch_news_snippets(q)
-            st.subheader("Recent news")
+            news = fetch_news_snippets(effective_q, max_items=5)  # limit to TOP 5
+            st.subheader("Recent news (top 5)")
             if news:
                 st.dataframe(pd.DataFrame(news), use_container_width=True)
             else:
-                st.info("No news found. Try a company/ticker (e.g., 'NVIDIA news'), or force 'News' via the selector.")
+                st.info("No news found. Try a company/ticker (e.g., 'NVIDIA news'), or force 'News' via the dropdown.")
             if st.session_state.get("session_name"):
                 sid = get_or_create_session(st.session_state["session_name"])
                 st.session_state.last_turn_id = save_turn(
-                    session_id=sid, mode="EXT-NEWS", question=q, clarified_question=st.session_state.suggested_q,
+                    session_id=sid, mode="EXT-NEWS", question=original_q,
+                    clarified_question=(st.session_state.suggested_q or None),
                     sql=None, row_count=None, chart_type=None
                 )
 
-        # ---- Offtopic ----
         else:
             st.warning("This looks outside CRM or company intel. Please rephrase or ask about CRM metrics, 10-K items, or recent news.")
             if st.session_state.get("session_name"):
                 sid = get_or_create_session(st.session_state["session_name"])
                 st.session_state.last_turn_id = save_turn(
-                    session_id=sid, mode="OFFTOPIC", question=q, clarified_question=st.session_state.suggested_q,
+                    session_id=sid, mode="OFFTOPIC", question=original_q,
+                    clarified_question=(st.session_state.suggested_q or None),
                     sql=None, row_count=None, chart_type=None
                 )
 
 # ---------------- Feedback (compact) ----------------
 if st.session_state.get("last_turn_id"):
     st.markdown("<p style='font-size:14px; margin-bottom:4px;'>Was this answer useful?</p>", unsafe_allow_html=True)
-    fb1, fb2, fb3 = st.columns([1,1,4])
-    with fb3:
-        note = st.text_input("Optional comment", label_visibility="collapsed", placeholder="Tell us why…")
+    fb1, fb2 = st.columns(2)
+    note = st.text_input("Optional comment", label_visibility="collapsed", placeholder="Tell us why…")
     if fb1.button("👍"):
         save_feedback_for_turn(st.session_state["last_turn_id"], "up", note or None)
         st.success("Thanks for the feedback!")

@@ -6,13 +6,13 @@ __pycache__/
 .venv/
 venv/
 
-# Local config
+# Local configs
 .env
 *.db
 
-# System
-.DS_Store
-Thumbs.db
-
 # Streamlit cache
 .streamlit/
+
+# System cruft
+.DS_Store
+Thumbs.db

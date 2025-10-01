@@ -3,6 +3,11 @@ from datetime import datetime
 from typing import Optional, List, Tuple, Any, Dict
 from app.db.connector import get_conn
 
+def _column_exists(cursor, table: str, column: str) -> bool:
+    rows = cursor.execute(f"PRAGMA table_info({table})").fetchall()
+    cols = {r[1] for r in rows}  # (cid, name, type, ...)
+    return column in cols
+
 def ensure_tables():
     with get_conn() as c:
         c.execute("""
@@ -36,6 +41,12 @@ def ensure_tables():
                 FOREIGN KEY(turn_id) REFERENCES SessionTurns(id) ON DELETE CASCADE
             );
         """)
+        # ---- Safe migrations for older DBs ----
+        # Ensure AppFeedback.turn_id exists
+        if not _column_exists(c, "AppFeedback", "turn_id"):
+            c.execute("ALTER TABLE AppFeedback ADD COLUMN turn_id INTEGER")
+        if not _column_exists(c, "AppFeedback", "created_at"):
+            c.execute("ALTER TABLE AppFeedback ADD COLUMN created_at TEXT")
 
 def list_sessions() -> List[Tuple[int, str]]:
     with get_conn() as c:
@@ -84,8 +95,8 @@ def list_turns(session_id: int) -> List[Dict[str, Any]]:
             SELECT id, created_at, mode, question, clarified_question, sql, row_count, chart_type
             FROM SessionTurns WHERE session_id = ? ORDER BY id DESC
         """, (session_id,)).fetchall()
-        cols = ["id","created_at","mode","question","clarified_question","sql","row_count","chart_type"]
-        return [dict(zip(cols, r)) for r in rows]
+    cols = ["id","created_at","mode","question","clarified_question","sql","row_count","chart_type"]
+    return [dict(zip(cols, r)) for r in rows]
 
 def save_feedback_for_turn(turn_id: int, vote: str, comment: Optional[str]) -> int:
     with get_conn() as c:
